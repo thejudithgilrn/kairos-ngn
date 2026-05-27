@@ -1,129 +1,105 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { selectNextItemType } from "@/lib/ai/adaptive";
+import { CJMMScores, ItemType } from "@/lib/types";
+import { fallbackQuestion } from "@/lib/ai/questionFallbacks";
+import { questionSchemas } from "@/lib/ai/questionSchemas";
+
+const itemTypeRules: Record<string, string> = {
+  bowtie: "Return causes, one action label, and outcomes.",
+  cloze: "Return clozeText, blanks, and correct object keyed by blank id.",
+  highlight: "Return sentenceParts and correct array with selected significant findings.",
+  dragdrop: "Return chips, zones, and correct mapping zone->chip.",
+  matrix: "Return rows, columns, and correct mapping row->column.",
+  trend: "Return trendRows, options, and correct option string.",
+};
+
+function extractJson(text: string) {
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? text.slice(start, end + 1) : text;
+}
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const itemType = body.itemType ?? "bowtie";
+  let itemType = (body.itemType ?? "bowtie") as ItemType;
+  const sessionId = body.sessionId as string | undefined;
 
-  const shared = {
-    cjmmDomain: "prioritize",
-    lasaterDomain: "responding",
-    difficulty: "beginning",
-    caseArea: "Medical-Surgical",
-    explanation:
-      "Prioritization in early deterioration depends on perfusion and oxygenation status.",
-    case: {
-      patient: "Client: 67-year-old with CHF exacerbation",
-      context:
-        "Admitted 4 hours ago with dyspnea. Urine output decreased and crackles are now bilateral.",
-      vitals: { HR: "118", RR: "30", SpO2: "88% RA", BP: "162/94" },
-      abnormalVitals: ["RR", "SpO2", "HR"],
-    },
-  };
+  if (itemType === "adaptive") {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user) {
+      const { data: attempts } = await supabase
+        .from("question_attempts")
+        .select("item_type,cjmm_domain,score")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
 
-  const questionByType: Record<string, object> = {
-    bowtie: {
-      ...shared,
-      type: "bowtie",
-      stem: "Which finding requires the most immediate intervention?",
-      causes: {
-        options: [
-          "Acute fluid volume overload",
-          "Medication nonadherence",
-          "Pulmonary embolism",
-          "Anxiety attack",
-        ],
-        correct: ["Acute fluid volume overload"],
-      },
-      action: { label: "Administer prescribed IV diuretic and elevate HOB" },
-      outcomes: {
-        options: [
-          "Improved oxygen saturation and work of breathing",
-          "Increased peripheral edema",
-          "Rising serum lactate",
-          "Worsening crackles",
-        ],
-        correct: ["Improved oxygen saturation and work of breathing"],
-      },
-      correct: {
-        causes: ["Acute fluid volume overload"],
-        outcomes: ["Improved oxygen saturation and work of breathing"],
-      },
-    },
-    cloze: {
-      ...shared,
-      type: "cloze",
-      stem: "Complete the nursing plan for this unstable patient.",
-      clozeText: "The priority intervention is __A__. Monitor for __B__ in response.",
-      blanks: [
-        { id: "a", options: ["IV diuretic", "Oral antacid", "PRN sleep aid"] },
-        { id: "b", options: ["improved SpO2", "worsening edema", "new rash"] },
-      ],
-      correct: { a: "IV diuretic", b: "improved SpO2" },
-    },
-    highlight: {
-      ...shared,
-      type: "highlight",
-      stem: "Highlight the findings that indicate clinical deterioration.",
-      sentenceParts: [
-        "RR increased from 22 to 30,",
-        "urine output 20 mL/hr,",
-        "client reports orthopnea,",
-        "skin warm and dry,",
-      ],
-      correct: [
-        "RR increased from 22 to 30,",
-        "urine output 20 mL/hr,",
-        "client reports orthopnea,",
-      ],
-    },
-    dragdrop: {
-      ...shared,
-      type: "dragdrop",
-      stem: "Assign each intervention to the appropriate priority bucket.",
-      chips: ["High-flow oxygen", "Daily weight", "Repeat potassium"],
-      zones: ["Immediate", "Soon", "Monitor"],
-      correct: {
-        Immediate: "High-flow oxygen",
-        Soon: "Repeat potassium",
-        Monitor: "Daily weight",
-      },
-    },
-    matrix: {
-      ...shared,
-      type: "matrix",
-      stem: "Classify each intervention for this patient's current state.",
-      rows: ["IV loop diuretic", "2L fluid bolus", "Continuous pulse oximetry"],
-      columns: ["Indicated", "Contraindicated", "Non-Essential"],
-      correct: {
-        "IV loop diuretic": "Indicated",
-        "2L fluid bolus": "Contraindicated",
-        "Continuous pulse oximetry": "Indicated",
-      },
-    },
-    trend: {
-      ...shared,
-      type: "trend",
-      stem: "Which trend is most concerning and requires immediate escalation?",
-      trendRows: [
-        { metric: "SpO2", t1: "94%", t2: "91%", t3: "88%" },
-        { metric: "Urine output", t1: "45", t2: "30", t3: "20" },
-        { metric: "Temp", t1: "98.9", t2: "99.0", t3: "99.1" },
-      ],
-      options: [
-        "Declining oxygen saturation with oliguria",
-        "Stable temperature over time",
-        "No clinically meaningful change",
-      ],
-      correct: "Declining oxygen saturation with oliguria",
-    },
-  };
+      const scores: CJMMScores = {
+        recognize: 50,
+        analyze: 50,
+        prioritize: 50,
+        generate: 50,
+        action: 50,
+        evaluate: 50,
+      };
+      (attempts ?? []).forEach((a) => {
+        const d = a.cjmm_domain as keyof CJMMScores;
+        scores[d] = Math.round((scores[d] + a.score) / 2);
+      });
+      itemType = selectNextItemType(scores, (attempts ?? []) as { item_type: ItemType }[]);
+    } else {
+      itemType = "bowtie";
+    }
+  }
 
-  const question =
-    itemType === "adaptive"
-      ? questionByType.bowtie
-      : questionByType[itemType] ?? questionByType.bowtie;
+  let question = fallbackQuestion(itemType as Exclude<ItemType, "adaptive">);
+  const schema =
+    questionSchemas[itemType as keyof typeof questionSchemas] ?? questionSchemas.bowtie;
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const prompt = `You are a clinical nursing education expert.
+Generate one NGN ${itemType} question.
+Rules: ${itemTypeRules[itemType] ?? "Return valid NGN item payload."}
+Return strict JSON only with keys required by this item.
+Must include: type, stem, cjmmDomain, lasaterDomain, difficulty, caseArea, explanation, case, and correct answer keys.
+`;
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-3-5-sonnet-latest",
+          max_tokens: 1400,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      if (response.ok) {
+        const bodyJson = (await response.json()) as {
+          content?: { type: string; text?: string }[];
+        };
+        const text = bodyJson.content?.find((c) => c.type === "text")?.text ?? "";
+        const parsed = JSON.parse(extractJson(text));
+        const validated = schema.safeParse(parsed);
+        if (validated.success) {
+          question = validated.data;
+        }
+      }
+    } catch {
+      // Keep fallback question on AI or parse failure.
+    }
+  }
 
   return NextResponse.json({
+    sessionId,
     question,
   });
 }

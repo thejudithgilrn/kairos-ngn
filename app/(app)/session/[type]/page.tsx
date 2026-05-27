@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { BowTie } from "@/components/question/types/BowTie";
 import { Cloze } from "@/components/question/types/Cloze";
 import { DragDrop } from "@/components/question/types/DragDrop";
@@ -14,39 +14,80 @@ import { QuestionShape } from "@/lib/types";
 
 export default function SessionTypePage() {
   const params = useParams<{ type: string }>();
+  const router = useRouter();
   const [question, setQuestion] = useState<QuestionShape | null>(null);
   const [feedback, setFeedback] = useState<string>("");
+  const [questionNumber, setQuestionNumber] = useState(1);
+  const [submitting, setSubmitting] = useState(false);
+  const [loadingNext, setLoadingNext] = useState(false);
+  const [sessionId] = useState(() => crypto.randomUUID());
+  const [sessionDone, setSessionDone] = useState(false);
+
+  async function loadQuestion() {
+    setLoadingNext(true);
+    const res = await fetch("/api/question/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        itemType: params.type,
+        cjmmDomain: "prioritize",
+        sessionId,
+      }),
+    });
+    const data = await res.json();
+    setQuestion(data.question);
+    setLoadingNext(false);
+  }
 
   useEffect(() => {
-    const run = async () => {
-      const res = await fetch("/api/question/generate", {
-        method: "POST",
-        body: JSON.stringify({ itemType: params.type, cjmmDomain: "prioritize" }),
-      });
-      const data = await res.json();
-      setQuestion(data.question);
-    };
-    run();
+    loadQuestion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.type]);
 
   async function handleSubmit(answer: unknown) {
     if (!question) return;
+    setSubmitting(true);
     const res = await fetch("/api/question/score", {
       method: "POST",
-      body: JSON.stringify({ question, answer, itemType: question.type }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        answer,
+        itemType: question.type,
+        sessionId,
+      }),
     });
     const data = await res.json();
     setFeedback(data.feedback);
+    setSubmitting(false);
   }
 
-  if (!question) return <p>Loading question...</p>;
+  async function handleNext() {
+    if (questionNumber >= 10) {
+      setSessionDone(true);
+      const res = await fetch("/api/session/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, sessionType: params.type }),
+      });
+      if (res.ok) {
+        router.push(`/results/${sessionId}`);
+      }
+      return;
+    }
+    setFeedback("");
+    setQuestionNumber((n) => n + 1);
+    await loadQuestion();
+  }
+
+  if (loadingNext || !question) return <p>Loading question...</p>;
 
   return (
     <div className="grid gap-4 md:grid-cols-[1fr_320px]">
       <div className="grid gap-4">
         <div className="flex items-center gap-4">
-          <ProgressBar value={10} />
-          <span className="font-ui text-xs">Q 1 of 10</span>
+          <ProgressBar value={questionNumber * 10} />
+          <span className="font-ui text-xs">Q {questionNumber} of 10</span>
         </div>
         <Card>
           <p className="font-heading text-2xl font-bold">{question.case.patient}</p>
@@ -104,12 +145,23 @@ export default function SessionTypePage() {
           <Card>
             <p className="font-ui text-xs">FEEDBACK</p>
             <p className="text-sm">{feedback}</p>
+            <button
+              onClick={handleNext}
+              className="mt-3 rounded bg-stone-900 px-3 py-2 text-sm font-semibold text-white"
+            >
+              {sessionDone
+                ? "Finalizing..."
+                : questionNumber >= 10
+                ? "Finish Session"
+                : "Next Question"}
+            </button>
           </Card>
         ) : null}
       </div>
       <Card>
         <p className="font-ui text-xs">LIVE SCORES</p>
         <p className="mt-2 text-sm">CJMM + Lasater scorebars scaffolded for live updates.</p>
+        {submitting ? <p className="mt-2 text-xs">Scoring...</p> : null}
       </Card>
     </div>
   );
