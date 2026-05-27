@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "app/api/question/generate/route.ts": { "maxDuration": 30 },
+    "app/api/question/score/route.ts": { "maxDuration": 30 },
+    "app/api/session/finalize/route.ts": { "maxDuration": 60 }
+  }
+}
